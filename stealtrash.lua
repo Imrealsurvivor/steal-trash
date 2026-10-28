@@ -1499,39 +1499,113 @@ xpcall(function()
 	end)
 end, function(e) warn("[Visual tab error] " .. tostring(e)) end)
 
----------------------------------------------------------------- Predict tab: spawn prediction
+---------------------------------------------------------------- Predict tab: real-time spawn clock + learning
 xpcall(function()
 	local StarterGui = game:GetService("StarterGui")
-	local predictPage = newPage("Predict", true, 400)
+	local predictPage = newPage("Predict", true, 700)
 
-	local trackBtn = makeSection(predictPage, 0, 10, "Spawn Tracker",
-		"Learns what spawns, where and how often while it runs.", {})
-	local trackOn = true
-	setToggle(trackBtn, trackOn, "TRACKING")
+	-- on-screen banner (shows even if the game blocks normal notifications)
+	local banner = Instance.new("TextLabel")
+	banner.Size = UDim2.fromOffset(330, 46)
+	banner.Position = UDim2.new(0.5, -165, 0, 12)
+	banner.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+	banner.BackgroundTransparency = 0.1
+	banner.Font = Enum.Font.GothamBold
+	banner.TextSize = 13
+	banner.TextWrapped = true
+	banner.TextColor3 = Color3.new(1, 1, 1)
+	banner.Visible = false
+	banner.ZIndex = 50
+	banner.Parent = gui
+	Instance.new("UICorner", banner).CornerRadius = UDim.new(0, 8)
+	local bannerToken = 0
 
-	local alertBtn, alertBoxes = makeSection(predictPage, 0.5, 5, "Spawn Alert",
-		"Notifies you when new trash spawns at or above this kg.", { { "0", "Alert min kg (0 = all)" } })
+	local function notify(titleText, text, color)
+		pcall(function()
+			StarterGui:SetCore("SendNotification", { Title = titleText, Text = text, Duration = 5 })
+		end)
+		bannerToken = bannerToken + 1
+		local mine = bannerToken
+		banner.Text = titleText .. "\n" .. text
+		banner.TextColor3 = color or Color3.new(1, 1, 1)
+		banner.Visible = true
+		task.delay(5, function()
+			if bannerToken == mine then banner.Visible = false end
+		end)
+	end
+
+	-- real time (server clock, seconds since 1970)
+	local function nowSec()
+		local ok, t = pcall(function() return workspace:GetServerTimeNow() end)
+		if ok and type(t) == "number" then return t end
+		return os.time()
+	end
+	local function fmt(s)
+		s = math.max(math.floor(s), 0)
+		return string.format("%02d:%02d", math.floor(s / 60), s % 60)
+	end
+
+	-- big countdown panel
+	local clockPanel = Instance.new("Frame")
+	clockPanel.Size = UDim2.new(1, -20, 0, 62)
+	clockPanel.Position = UDim2.fromOffset(10, 10)
+	clockPanel.BackgroundColor3 = Color3.fromRGB(35, 35, 43)
+	clockPanel.BorderSizePixel = 0
+	clockPanel.Parent = predictPage
+	Instance.new("UICorner", clockPanel).CornerRadius = UDim.new(0, 6)
+	local clockLabel = newText(clockPanel, 6, 52, "...", 13, true)
+
+	-- notify settings
+	local spawnBtn, spawnBoxes = makeSection(predictPage, 0, 10, "Spawn Notify",
+		"Warns before each 5-min spawn and when it happens.", { { "15", "Warn before (sec)" } }, 80)
+	local warnBox = spawnBoxes[1]
+	local mythicBtn, mythicBoxes = makeSection(predictPage, 0.5, 5, "Mythic Notify",
+		"Warns before the hourly guaranteed mythic and when it spawns.", { { "60", "Warn before (sec)" } }, 80)
+	local mWarnBox = mythicBoxes[1]
+	local alertBtn, alertBoxes = makeSection(predictPage, 0, 10, "Item Alert",
+		"Notifies for every new trash at or above this kg.", { { "0", "Alert min kg (0 = all)" } }, 240)
 	local alertBox = alertBoxes[1]
-	local alertOn = false
-	setToggle(alertBtn, alertOn, "SPAWN ALERT")
+	local resetBtn = makeSection(predictPage, 0.5, 5, "Learning",
+		"Learns spawn chances from what it sees. Reset to start over.", {}, 240)
+	resetBtn.Text = "RESET LEARNED DATA"
 
+	local spawnNotifyOn, mythicNotifyOn, itemAlertOn = true, true, false
+	setToggle(spawnBtn, spawnNotifyOn, "SPAWN NOTIFY")
+	setToggle(mythicBtn, mythicNotifyOn, "MYTHIC NOTIFY")
+	setToggle(alertBtn, itemAlertOn, "ITEM ALERT")
+	spawnBtn.MouseButton1Click:Connect(function()
+		spawnNotifyOn = not spawnNotifyOn
+		setToggle(spawnBtn, spawnNotifyOn, "SPAWN NOTIFY")
+	end)
+	mythicBtn.MouseButton1Click:Connect(function()
+		mythicNotifyOn = not mythicNotifyOn
+		setToggle(mythicBtn, mythicNotifyOn, "MYTHIC NOTIFY")
+	end)
+	alertBtn.MouseButton1Click:Connect(function()
+		itemAlertOn = not itemAlertOn
+		setToggle(alertBtn, itemAlertOn, "ITEM ALERT")
+	end)
+
+	-- prediction panel
 	local panel = Instance.new("Frame")
-	panel.Size = UDim2.new(1, -20, 0, 215)
-	panel.Position = UDim2.fromOffset(10, 170)
+	panel.Size = UDim2.new(1, -20, 0, 284)
+	panel.Position = UDim2.fromOffset(10, 400)
 	panel.BackgroundColor3 = Color3.fromRGB(35, 35, 43)
 	panel.BorderSizePixel = 0
 	panel.Parent = predictPage
 	Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 6)
-	local infoLabel = newText(panel, 8, 168, "Collecting data...", 11, false)
-	local topSpotBtn = makeButton(panel, UDim2.fromOffset(8, 180), UDim2.new(1, -16, 0, 28),
+	local infoLabel = newText(panel, 8, 200, "Learning...", 11, false)
+	local goSpotBtn = makeButton(panel, UDim2.fromOffset(8, 214), UDim2.new(1, -16, 0, 28),
 		"GO TO TOP SPAWN SPOT", Color3.fromRGB(60, 60, 90))
+	local goMythicBtn = makeButton(panel, UDim2.fromOffset(8, 246), UDim2.new(1, -16, 0, 28),
+		"GO TO MYTHIC SPOT", Color3.fromRGB(120, 90, 30))
 
-	-- what we have seen so far
-	local typeCount, typeInfo = {}, {}
-	local total, sumKg, sumVal = 0, 0, 0
-	local spots = {}
-	local waves, lastEventAt, lastAlert = {}, 0, 0
-	local topSpot = nil
+	---------------- learned data (all in one table so it can be reset)
+	local L = {
+		types = {}, info = {}, nW = {}, hW = {}, nTot = 0, hTot = 0,
+		waves = {}, spots = {}, mSpots = {}, mythicTypes = {},
+		lagSum = 0, lagN = 0, haveRarity = false, topSpot = nil, mSpot = nil,
+	}
 
 	local function partPos(t)
 		if t:IsA("PVInstance") then return t:GetPivot().Position end
@@ -1539,7 +1613,26 @@ xpcall(function()
 		return p and p.Position
 	end
 
-	-- "Name (kg) | rarity | $value"
+	local function addSpot(tbl, pos)
+		local gx = math.floor(pos.X / 20 + 0.5) * 20
+		local gz = math.floor(pos.Z / 20 + 0.5) * 20
+		local k = gx .. "," .. gz
+		local s = tbl[k]
+		if not s then
+			s = { x = gx, y = pos.Y, z = gz, n = 0 }
+			tbl[k] = s
+		end
+		s.n = s.n + 1
+		s.y = pos.Y
+	end
+
+	local function sortedSpots(tbl)
+		local out = {}
+		for _, s in pairs(tbl) do out[#out + 1] = s end
+		table.sort(out, function(a, b) return a.n > b.n end)
+		return out
+	end
+
 	local function describe(t)
 		local text = t.Name
 		local kg = getWeight(t)
@@ -1550,173 +1643,243 @@ xpcall(function()
 		return text
 	end
 
+	local function isMythic(t)
+		local r = trashRarity(t)
+		if r == nil then return false end
+		if type(r) == "string" then return r:lower():find("mythic", 1, true) ~= nil end
+		return rarityRank(r) >= 6
+	end
+
+	local lastItemAlert = 0
+
 	local function record(t, isNew)
 		local key = t.Name
 		local kg, v = getWeight(t), trashValue(t)
-		typeCount[key] = (typeCount[key] or 0) + 1
-		typeInfo[key] = { label = describe(t), kg = kg, value = v }
-		total = total + 1
-		sumKg = sumKg + kg
-		sumVal = sumVal + v
+		if trashRarity(t) ~= nil then L.haveRarity = true end
+		local myth = isMythic(t)
+		local text = describe(t)
+		L.info[key] = { label = text, kg = kg, value = v }
+		L.types[key] = (L.types[key] or 0) + 1
 
 		local pos = partPos(t)
 		if pos then
-			local gx = math.floor(pos.X / 20 + 0.5) * 20
-			local gz = math.floor(pos.Z / 20 + 0.5) * 20
-			local k = gx .. "," .. gz
-			local s = spots[k]
-			if not s then
-				s = { x = gx, y = pos.Y, z = gz, n = 0 }
-				spots[k] = s
-			end
-			s.n = s.n + 1
-			s.y = pos.Y
+			addSpot(L.spots, pos)
+			if myth then addSpot(L.mSpots, pos) end
 		end
 
-		if isNew then
-			local now = os.clock()
-			if now - lastEventAt > 3 then -- a new spawn wave
-				waves[#waves + 1] = now
-				if #waves > 30 then table.remove(waves, 1) end
+		if not isNew then return end -- trash that was already there is data, not a new spawn
+
+		local now = nowSec()
+		local slot = math.floor(now / 300) -- which 5-minute slot of the real clock
+		local hour = slot % 12 == 0 -- 12 slots = the top of the hour
+		local lag = now % 300
+		if lag <= 120 then
+			L.lagSum = L.lagSum + lag
+			L.lagN = L.lagN + 1
+		end
+
+		local w = L.waves[slot]
+		if not w then
+			w = { hour = hour, items = 0, kg = 0, bestScore = -1, bestKey = nil, mythic = false }
+			L.waves[slot] = w
+			L.waves[slot - 300] = nil
+			-- older spawns count a little less each wave (so it follows changes)
+			local tbl = hour and L.hW or L.nW
+			for k, val in pairs(tbl) do tbl[k] = val * 0.97 end
+			-- summary a few seconds after the wave starts
+			task.delay(4, function()
+				if spawnNotifyOn and w.items > 0 then
+					local best = w.bestKey and L.info[w.bestKey]
+					notify(hour and "Hour wave spawned" or "Spawn wave",
+						w.items .. " new trash" .. (best and ("\nBest: " .. best.label) or ""))
+				end
+			end)
+		end
+		w.items = w.items + 1
+		w.kg = w.kg + kg
+
+		local tbl = hour and L.hW or L.nW
+		tbl[key] = (tbl[key] or 0) + 1
+		if hour then L.hTot = L.hTot + 1 else L.nTot = L.nTot + 1 end
+
+		local score = v > 0 and v or kg
+		if score > w.bestScore then
+			w.bestScore = score
+			w.bestKey = key
+		end
+
+		if myth then
+			w.mythic = true
+			L.mythicTypes[key] = (L.mythicTypes[key] or 0) + 1
+			if mythicNotifyOn then
+				local where = pos and string.format("\nat x %d, z %d", math.floor(pos.X), math.floor(pos.Z)) or ""
+				notify("MYTHIC SPAWNED", text .. where, Color3.fromRGB(255, 215, 60))
 			end
-			lastEventAt = now
-			if alertOn and kg >= (tonumber(alertBox.Text) or 0) and now - lastAlert >= 1 then
-				lastAlert = now
-				pcall(function()
-					StarterGui:SetCore("SendNotification", {
-						Title = "New trash", Text = typeInfo[key].label, Duration = 4,
-					})
-				end)
-			end
+		end
+
+		if itemAlertOn and kg >= (tonumber(alertBox.Text) or 0) and now - lastItemAlert >= 1 then
+			lastItemAlert = now
+			notify("New trash", text)
 		end
 	end
 
-	-- trash that is already there counts as data, not as a new spawn
 	for _, t in ipairs(TrashFolder:GetChildren()) do record(t, false) end
 	TrashFolder.ChildAdded:Connect(function(t)
-		if not trackOn then return end
 		task.delay(0.25, function() -- let its rarity / value finish loading
 			if t.Parent then record(t, true) end
 		end)
 	end)
 
-	trackBtn.MouseButton1Click:Connect(function()
-		trackOn = not trackOn
-		setToggle(trackBtn, trackOn, "TRACKING")
-	end)
-	alertBtn.MouseButton1Click:Connect(function()
-		alertOn = not alertOn
-		setToggle(alertBtn, alertOn, "SPAWN ALERT")
+	resetBtn.MouseButton1Click:Connect(function()
+		L.types, L.info, L.nW, L.hW = {}, {}, {}, {}
+		L.nTot, L.hTot, L.waves, L.spots, L.mSpots, L.mythicTypes = 0, 0, {}, {}, {}, {}
+		L.lagSum, L.lagN, L.topSpot, L.mSpot = 0, 0, nil, nil
+		notify("Predict", "Learned data cleared")
 	end)
 
-	-- average time between spawn waves (last few)
-	local function avgInterval()
-		if #waves < 2 then return nil end
-		local n = math.min(#waves - 1, 6)
-		local sum = 0
-		for i = #waves - n + 1, #waves do
-			sum = sum + (waves[i] - waves[i - 1])
-		end
-		return sum / n
-	end
+	goSpotBtn.MouseButton1Click:Connect(function()
+		local hrp, s = getHRP(), L.topSpot
+		if hrp and s then hrp.CFrame = CFrame.new(s.x, s.y + 4, s.z) end
+	end)
+	goMythicBtn.MouseButton1Click:Connect(function()
+		local hrp, s = getHRP(), L.mSpot or L.topSpot
+		if hrp and s then hrp.CFrame = CFrame.new(s.x, s.y + 4, s.z) end
+	end)
 
-	-- a timer the game itself may expose (attribute with spawn / timer / next in its name)
-	local function findTimer()
-		for _, holder in ipairs({ TrashFolder, workspace, RS }) do
-			for k, v in pairs(holder:GetAttributes()) do
-				local lk = k:lower()
-				if type(v) == "number" and (lk:find("spawn") or lk:find("timer") or lk:find("next") or lk:find("countdown")) then
-					return k, v
+	---------------- countdown + notifications (runs even when this tab is closed)
+	task.spawn(function()
+		local warnedSpawn, warnedMythic = {}, {}
+		local lastSlot = math.floor(nowSec() / 300)
+		while task.wait(0.25) do
+			local t = nowSec()
+			local slot = math.floor(t / 300)
+			local s5 = 300 - (t % 300)
+			local sh = 3600 - (t % 3600)
+			local clockOk, clockText = pcall(os.date, "%I:%M:%S %p")
+
+			clockLabel.Text = string.format("Next spawn:  %s   (every 5 min, on the clock)\nGuaranteed mythic:  %s   (every hour, on the hour)\nClock now: %s",
+				fmt(s5), fmt(sh), clockOk and clockText or "?")
+
+			local hourSoon = math.floor(t / 3600) + 1
+			local warnS = tonumber(warnBox.Text) or 15
+			local warnM = tonumber(mWarnBox.Text) or 60
+
+			if spawnNotifyOn and warnS > 0 and s5 <= warnS and not warnedSpawn[slot + 1] then
+				warnedSpawn[slot + 1] = true
+				notify("Spawn soon", "New trash spawns in " .. math.ceil(s5) .. "s")
+			end
+			if mythicNotifyOn and warnM > 0 and sh <= warnM and not warnedMythic[hourSoon] then
+				warnedMythic[hourSoon] = true
+				notify("Mythic soon", "Guaranteed mythic in " .. fmt(sh), Color3.fromRGB(255, 215, 60))
+			end
+
+			if slot ~= lastSlot then
+				lastSlot = slot
+				if slot % 12 == 0 and mythicNotifyOn then
+					notify("MYTHIC HOUR", "Guaranteed mythic is spawning now!", Color3.fromRGB(255, 215, 60))
+				elseif spawnNotifyOn then
+					notify("Spawn now!", "New trash is spawning")
 				end
 			end
 		end
-	end
-
-	-- look for a folder in ReplicatedStorage that holds the trash types (names with "(Xkg)")
-	local poolText = "Pool: not found in ReplicatedStorage"
-	do
-		local bestInst, bestN = nil, 0
-		for _, inst in ipairs(RS:GetDescendants()) do
-			if inst:IsA("Folder") or inst:IsA("Configuration") then
-				local n = 0
-				for _, c in ipairs(inst:GetChildren()) do
-					if c.Name:find("%(%s*[%d%.]+%s*kg%)") then n = n + 1 end
-				end
-				if n > bestN then bestInst, bestN = inst, n end
-			end
-		end
-		if bestInst and bestN >= 3 then
-			poolText = "Pool: " .. bestN .. " types in " .. bestInst:GetFullName()
-			local topV, topC = 0, nil
-			for _, c in ipairs(bestInst:GetChildren()) do
-				local v = trashValue(c)
-				if v > topV then topV, topC = v, c end
-			end
-			if topC then poolText = poolText .. "\nBest possible: " .. describe(topC) end
-		end
-	end
-
-	topSpotBtn.MouseButton1Click:Connect(function()
-		local hrp = getHRP()
-		if hrp and topSpot then
-			hrp.CFrame = CFrame.new(topSpot.x, topSpot.y + 4, topSpot.z)
-		end
 	end)
 
+	---------------- prediction text (what / where) from the learned data
 	task.spawn(function()
 		while task.wait(1) do
 			if predictPage.Visible then
-				local now = os.clock()
 				local lines = {}
+				local t = nowSec()
+				local nextHour = (math.floor(t / 300) + 1) % 12 == 0
 
-				-- when
-				local avg = avgInterval()
-				if avg then
-					local nextIn = waves[#waves] + avg - now
-					if nextIn >= 0 then
-						lines[#lines + 1] = string.format("Next spawn wave: ~%ds (every ~%ds, %d waves seen)",
-							math.floor(nextIn), math.floor(avg), #waves)
-					else
-						lines[#lines + 1] = string.format("Next spawn wave: overdue by %ds (usually every ~%ds)",
-							math.floor(-nextIn), math.floor(avg))
-					end
+				-- what will spawn next: chances learned from the same kind of wave
+				local tbl, tot, src
+				if nextHour then
+					tbl, tot, src = L.hW, L.hTot, "hour waves"
 				else
-					lines[#lines + 1] = "Next spawn wave: learning... (need 2 waves, seen " .. #waves .. ")"
+					tbl, tot, src = L.nW, L.nTot, "5-min waves"
 				end
-				local tk, tv = findTimer()
-				if tk then
-					lines[#lines + 1] = "Game timer: " .. tk .. " = " .. tostring(math.floor(tv * 10) / 10)
-				end
+				if tot < 3 then tbl, src = L.types, "all spawns so far" end
 
-				-- what
-				if total > 0 then
+				local sum = 0
+				for _, wgt in pairs(tbl) do sum = sum + wgt end
+				lines[#lines + 1] = (nextHour and "Next wave: HOUR wave" or "Next wave: normal wave") .. "  (learned from " .. src .. ")"
+				if sum > 0 then
 					local keys = {}
-					for k in pairs(typeCount) do keys[#keys + 1] = k end
+					for k in pairs(tbl) do keys[#keys + 1] = k end
 					table.sort(keys, function(a, b)
-						if typeCount[a] ~= typeCount[b] then return typeCount[a] > typeCount[b] end
+						if tbl[a] ~= tbl[b] then return tbl[a] > tbl[b] end
 						return a < b
 					end)
-					lines[#lines + 1] = "Likely next (" .. total .. " seen):"
 					for i = 1, math.min(4, #keys) do
 						local k = keys[i]
-						lines[#lines + 1] = string.format("%d. %s  %d%%", i, typeInfo[k].label,
-							math.floor(typeCount[k] / total * 100 + 0.5))
+						local info = L.info[k]
+						lines[#lines + 1] = string.format("%d. %s  %d%%", i, info and info.label or k,
+							math.floor(tbl[k] / sum * 100 + 0.5))
 					end
-					lines[#lines + 1] = string.format("Average spawn: %.1fkg, $%d", sumKg / total, math.floor(sumVal / total))
+				else
+					lines[#lines + 1] = "Learning... (no spawns seen yet)"
+				end
 
-					-- where
-					local spotList = {}
-					for _, s in pairs(spots) do spotList[#spotList + 1] = s end
-					table.sort(spotList, function(a, b) return a.n > b.n end)
-					topSpot = spotList[1]
-					for i = 1, math.min(2, #spotList) do
-						local s = spotList[i]
-						lines[#lines + 1] = string.format("Spot %d: x %d, z %d (%d%% of spawns)", i, s.x, s.z,
-							math.floor(s.n / total * 100 + 0.5))
+				-- wave statistics
+				local nw, ni, hw, hm = 0, 0, 0, 0
+				local bestCount = {}
+				for _, w in pairs(L.waves) do
+					if w.hour then
+						hw = hw + 1
+						if w.mythic then hm = hm + 1 end
+						if w.bestKey then bestCount[w.bestKey] = (bestCount[w.bestKey] or 0) + 1 end
+					else
+						nw = nw + 1
+						ni = ni + w.items
+					end
+				end
+				if nw > 0 then
+					lines[#lines + 1] = string.format("Normal wave: ~%.1f items on average (%d seen)", ni / nw, nw)
+				end
+
+				-- mythic (guaranteed every hour)
+				local mm
+				if L.haveRarity then
+					lines[#lines + 1] = string.format("Mythic seen in hour waves: %d / %d", hm, hw)
+					if next(L.mythicTypes) then mm = L.mythicTypes end
+				else
+					lines[#lines + 1] = "No rarity data found: mythic guess = best item of the hour wave"
+				end
+				mm = mm or bestCount
+				local mTot = 0
+				for _, c in pairs(mm) do mTot = mTot + c end
+				if mTot > 0 then
+					local mk = {}
+					for k in pairs(mm) do mk[#mk + 1] = k end
+					table.sort(mk, function(a, b)
+						if mm[a] ~= mm[b] then return mm[a] > mm[b] end
+						return a < b
+					end)
+					for i = 1, math.min(2, #mk) do
+						local info = L.info[mk[i]]
+						lines[#lines + 1] = string.format("Likely mythic %d: %s  %d%%", i,
+							info and info.label or mk[i], math.floor(mm[mk[i]] / mTot * 100 + 0.5))
 					end
 				end
 
-				lines[#lines + 1] = poolText
+				-- timing the game really uses
+				if L.lagN > 0 then
+					lines[#lines + 1] = string.format("Spawn lag after the mark: ~%.1fs (%d samples)", L.lagSum / L.lagN, L.lagN)
+				end
+
+				-- where
+				local spots = sortedSpots(L.spots)
+				L.topSpot = spots[1]
+				for i = 1, math.min(2, #spots) do
+					lines[#lines + 1] = string.format("Spot %d: x %d, z %d (%d spawns)", i, spots[i].x, spots[i].z, spots[i].n)
+				end
+				local mSpots = sortedSpots(L.mSpots)
+				L.mSpot = mSpots[1]
+				if mSpots[1] then
+					lines[#lines + 1] = string.format("Mythic spot: x %d, z %d (%d seen)", mSpots[1].x, mSpots[1].z, mSpots[1].n)
+				end
+
 				infoLabel.Text = table.concat(lines, "\n")
 			end
 		end
