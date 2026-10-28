@@ -2,6 +2,7 @@
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
 local lp = Players.LocalPlayer
 local TrashFolder = workspace:WaitForChild("SpawnedTrash")
@@ -552,6 +553,17 @@ local function trim(s)
 	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- moves hrp to cframe with a tween instead of an instant jump (avoids anti-cheat snap-back)
+local function tweenTo(hrp, cframe, speed)
+	if not hrp then return end
+	speed = speed or 60 -- studs per second
+	local dist = (cframe.Position - hrp.Position).Magnitude
+	local duration = math.clamp(dist / speed, 0.05, 2.5)
+	local tw = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = cframe })
+	tw:Play()
+	tw.Completed:Wait()
+end
+
 -- Detect which plot belongs to the local player (checks common owner patterns)
 local function ownsPlot(plot)
 	for _, k in ipairs({ "Owner", "OwnerId", "OwnerUserId", "Player", "PlotOwner" }) do
@@ -598,7 +610,7 @@ local function getWeight(trash)
 	return tonumber(w) or 0
 end
 
--- teleport to a Model / Part (or the first part inside a Folder)
+-- tween to a Model / Part (or the first part inside a Folder)
 local function teleportTo(inst, up)
 	local hrp = getHRP()
 	if not hrp or not inst then return false end
@@ -606,7 +618,7 @@ local function teleportTo(inst, up)
 		inst = inst:FindFirstChildWhichIsA("BasePart", true)
 		if not inst then return false end
 	end
-	hrp.CFrame = inst:GetPivot() + Vector3.new(0, up or 3, 0)
+	tweenTo(hrp, inst:GetPivot() + Vector3.new(0, up or 3, 0))
 	return true
 end
 
@@ -659,7 +671,7 @@ local function grabWithRetry(trash)
 end
 
 ---------------------------------------------------------------- Steal flow
--- teleport -> 1s -> grab -> 1s -> teleport to plot
+-- tween to trash -> 1s -> grab -> 1s -> tween to plot
 local function stealInner(trash)
 	local hrp = getHRP()
 	if not hrp then setStatus("no character") return false end
@@ -670,7 +682,7 @@ local function stealInner(trash)
 	-- still carrying the last trash? deliver it first
 	if getHeld() then
 		setStatus("delivering held trash")
-		hrp.CFrame = plot:GetPivot() + Vector3.new(0, 5, 0)
+		tweenTo(hrp, plot:GetPivot() + Vector3.new(0, 5, 0))
 		task.wait(1.5)
 		hrp = getHRP()
 		if not hrp then return false end
@@ -680,8 +692,8 @@ local function stealInner(trash)
 		end
 	end
 
-	setStatus("teleporting to trash")
-	hrp.CFrame = trash:GetPivot() + Vector3.new(0, 3, 0)
+	setStatus("moving to trash")
+	tweenTo(hrp, trash:GetPivot() + Vector3.new(0, 3, 0))
 	task.wait(1)
 
 	if not grabWithRetry(trash) then
@@ -693,8 +705,8 @@ local function stealInner(trash)
 
 	hrp = getHRP()
 	if not hrp then return false end
-	setStatus("teleporting to plot")
-	hrp.CFrame = plot:GetPivot() + Vector3.new(0, 5, 0)
+	setStatus("moving to plot")
+	tweenTo(hrp, plot:GetPivot() + Vector3.new(0, 5, 0))
 	return true
 end
 
@@ -871,15 +883,15 @@ local function tpTo(inst, name, up)
 	if not inst then
 		tpStatus.Text = "Status: " .. name .. " not found"
 	elseif teleportTo(inst, up) then
-		tpStatus.Text = "Status: teleported to " .. name
+		tpStatus.Text = "Status: moved to " .. name
 	else
 		tpStatus.Text = "Status: no character"
 	end
 end
 
-tpBase.MouseButton1Click:Connect(function() tpTo(getMyPlot(), "your plot", 5) end)
-tpSell.MouseButton1Click:Connect(function() tpTo(workspace:FindFirstChild("SellTeleport"), "SellTeleport", 3) end)
-tpCompress.MouseButton1Click:Connect(function() tpTo(workspace:FindFirstChild("TrashCompressor"), "TrashCompressor", 3) end)
+tpBase.MouseButton1Click:Connect(function() task.spawn(tpTo, getMyPlot(), "your plot", 5) end)
+tpSell.MouseButton1Click:Connect(function() task.spawn(tpTo, workspace:FindFirstChild("SellTeleport"), "SellTeleport", 3) end)
+tpCompress.MouseButton1Click:Connect(function() task.spawn(tpTo, workspace:FindFirstChild("TrashCompressor"), "TrashCompressor", 3) end)
 
 ---------------------------------------------------------------- Sell ID finder
 -- The sell remote needs an ID. We find it two ways:
@@ -941,7 +953,7 @@ compressBtn.MouseButton1Click:Connect(function()
 	setToggle(compressBtn, autoCompressOn, "AUTO COMPRESS")
 end)
 
--- held trash -> teleport to the sell spot -> sell -> back to base
+-- held trash -> move to the sell spot -> sell -> back to base
 local function sellHeld(held)
 	local name = held.Name
 	local spot = workspace:FindFirstChild("SellTeleport")
@@ -968,7 +980,7 @@ local function sellHeld(held)
 	returnToBase()
 end
 
--- held trash -> teleport to the compressor -> compress -> back to base
+-- held trash -> move to the compressor -> compress -> back to base
 local function compressHeld(held)
 	local name = held.Name
 	local spot = workspace:FindFirstChild("TrashCompressor")
@@ -1137,6 +1149,7 @@ local smartOn = true
 local lastActivate = 0
 
 -- one swing at a target. Returns true, or false + the reason.
+-- (this one still snaps instantly: the hit window is too short to tween)
 local function smartSwing(thrp)
 	local bat = findBat()
 	if not bat then return false, "no bat found" end
@@ -1309,7 +1322,7 @@ local function hitGrabber(p)
 		if not thrp or not hrp then break end
 
 		local behind = (thrp.CFrame * CFrame.new(0, 0, 3)).Position
-		hrp.CFrame = CFrame.lookAt(behind, thrp.Position)
+		tweenTo(hrp, CFrame.lookAt(behind, thrp.Position))
 		task.wait(0.2)
 		local ok, why = smartSwing(thrp)
 		if not ok then combatStatus.Text = "Status: hit failed - " .. tostring(why) end
@@ -1323,7 +1336,7 @@ local function hitGrabber(p)
 	else
 		combatStatus.Text = "Status: hit " .. p.Name
 		local hrp2 = getHRP()
-		if hrp2 then hrp2.CFrame = saved end
+		if hrp2 then tweenTo(hrp2, saved) end
 	end
 end
 
@@ -1800,11 +1813,11 @@ xpcall(function()
 
 	goSpotBtn.MouseButton1Click:Connect(function()
 		local hrp, s = getHRP(), L.topSpot
-		if hrp and s then hrp.CFrame = CFrame.new(s.x, s.y + 4, s.z) end
+		if hrp and s then task.spawn(tweenTo, hrp, CFrame.new(s.x, s.y + 4, s.z)) end
 	end)
 	goMythicBtn.MouseButton1Click:Connect(function()
 		local hrp, s = getHRP(), L.mSpot or L.topSpot
-		if hrp and s then hrp.CFrame = CFrame.new(s.x, s.y + 4, s.z) end
+		if hrp and s then task.spawn(tweenTo, hrp, CFrame.new(s.x, s.y + 4, s.z)) end
 	end)
 
 	---------------- countdown + notifications (runs even when this tab is closed)
