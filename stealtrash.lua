@@ -1,4 +1,4 @@
--- Steal Trash: Smart Autosteal + Filter + Auto Sell/Compress + Combat + Place + Visual (ESP) + Predict + Settings
+-- Steal Trash: Smart/Priority Autosteal + Filter + Auto Sell/Compress + Combat + Place + Visual (ESP) + Predict + Settings
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
@@ -122,7 +122,7 @@ local modeBtn = Instance.new("TextButton")
 modeBtn.Size = UDim2.new(1, 0, 0, 24)
 modeBtn.Position = UDim2.fromOffset(0, 88)
 modeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
-modeBtn.Text = "Mode: Smart (tap)"
+modeBtn.Text = "Mode: Priority (tap)"
 modeBtn.Font = Enum.Font.GothamBold
 modeBtn.TextSize = 12
 modeBtn.TextColor3 = Color3.new(1, 1, 1)
@@ -734,9 +734,10 @@ local function anyFits(remaining)
 	return false
 end
 
--- SMART AUTOSTEAL: how the next trash is chosen
-local SMART_MODES = { "Smart", "Highest kg", "Closest", "Highest value", "Rarest" }
+-- AUTOSTEAL TARGET MODES
+local SMART_MODES = { "Priority", "Priority only", "Smart", "Highest kg", "Closest", "Highest value", "Rarest" }
 local modeIndex = 1
+modeBtn.Text = "Mode: " .. SMART_MODES[modeIndex] .. " (tap)"
 
 local function otherPlayerNear(pos, radius)
 	for _, p in ipairs(Players:GetPlayers()) do
@@ -746,6 +747,17 @@ local function otherPlayerNear(pos, radius)
 		end
 	end
 	return false
+end
+
+-- priority: Mythic first, then Secret, then Epic
+local function priorityTier(t)
+	local r = trashRarity(t)
+	if r == nil then return 0 end
+	local s = tostring(r):lower()
+	if s:find("mythic", 1, true) then return 3 end
+	if s:find("secret", 1, true) then return 2 end
+	if s:find("epic", 1, true) then return 1 end
+	return 0
 end
 
 local function scoreTrash(t, mode, hrp)
@@ -758,7 +770,7 @@ local function scoreTrash(t, mode, hrp)
 	if mode == "Highest value" then return trashValue(t) + kg / 10000 end
 	if mode == "Rarest" then return rarityRank(trashRarity(t)) * 10000 + kg end
 
-	-- Smart: best value, else best rarity, else heaviest. Trash next to another player counts half.
+	-- Smart / Priority: best value, else best rarity, else heaviest. Trash next to another player counts half.
 	local v = trashValue(t)
 	local rank = rarityRank(trashRarity(t))
 	local base
@@ -770,6 +782,9 @@ local function scoreTrash(t, mode, hrp)
 		base = kg
 	end
 	if otherPlayerNear(t:GetPivot().Position, 25) then base = base * 0.5 end
+	if mode == "Priority" or mode == "Priority only" then
+		base = base + priorityTier(t) * 1e9
+	end
 	return base
 end
 
@@ -786,7 +801,8 @@ local function pickNext(remaining, cooldown)
 	for _, t in ipairs(TrashFolder:GetChildren()) do
 		local w = getWeight(t)
 		local cd = cooldown[t]
-		if w > 0 and w <= remaining and not (cd and os.clock() < cd) then
+		if w > 0 and w <= remaining and not (cd and os.clock() < cd)
+			and not (mode == "Priority only" and priorityTier(t) == 0) then
 			local s = scoreTrash(t, mode, hrp)
 			if not bestScore or s > bestScore then best, bestW, bestScore = t, w, s end
 		end
@@ -818,7 +834,7 @@ local function toggleAutoSteal()
 				local remaining = limit - total
 				local t, w = pickNext(remaining, cooldown)
 				if not t then
-					if anyFits(remaining) then
+					if SMART_MODES[modeIndex] == "Priority only" or anyFits(remaining) then
 						setStatus("waiting for trash... " .. total .. "/" .. limit .. "kg")
 						task.wait(1)
 					else
@@ -1499,10 +1515,10 @@ xpcall(function()
 	end)
 end, function(e) warn("[Visual tab error] " .. tostring(e)) end)
 
----------------------------------------------------------------- Predict tab: real-time spawn clock + learning
+---------------------------------------------------------------- Predict tab: real-time spawn clock + learning + last seen + copy
 xpcall(function()
 	local StarterGui = game:GetService("StarterGui")
-	local predictPage = newPage("Predict", true, 700)
+	local predictPage = newPage("Predict", true, 900)
 
 	-- on-screen banner (shows even if the game blocks normal notifications)
 	local banner = Instance.new("TextLabel")
@@ -1543,6 +1559,10 @@ xpcall(function()
 	local function fmt(s)
 		s = math.max(math.floor(s), 0)
 		return string.format("%02d:%02d", math.floor(s / 60), s % 60)
+	end
+	local function clockStr(t, pattern)
+		local ok, s = pcall(os.date, pattern or "%I:%M %p", math.floor(t))
+		return ok and s or "?"
 	end
 
 	-- big countdown panel
@@ -1600,12 +1620,40 @@ xpcall(function()
 	local goMythicBtn = makeButton(panel, UDim2.fromOffset(8, 246), UDim2.new(1, -16, 0, 28),
 		"GO TO MYTHIC SPOT", Color3.fromRGB(120, 90, 30))
 
+	-- last seen panel
+	local seenPanel = Instance.new("Frame")
+	seenPanel.Size = UDim2.new(1, -20, 0, 140)
+	seenPanel.Position = UDim2.fromOffset(10, 694)
+	seenPanel.BackgroundColor3 = Color3.fromRGB(35, 35, 43)
+	seenPanel.BorderSizePixel = 0
+	seenPanel.Parent = predictPage
+	Instance.new("UICorner", seenPanel).CornerRadius = UDim.new(0, 6)
+	local seenLabel = newText(seenPanel, 8, 126, "Last seen: ...", 11, false)
+
+	-- copy data button
+	local copyBtn = makeButton(predictPage, UDim2.fromOffset(10, 844), UDim2.new(1, -20, 0, 30),
+		"COPY PREDICTION DATA", Color3.fromRGB(60, 60, 90))
+
 	---------------- learned data (all in one table so it can be reset)
 	local L = {
 		types = {}, info = {}, nW = {}, hW = {}, nTot = 0, hTot = 0,
 		waves = {}, spots = {}, mSpots = {}, mythicTypes = {},
 		lagSum = 0, lagN = 0, haveRarity = false, topSpot = nil, mSpot = nil,
+		lastSeen = {}, -- rarity -> { time, label }
+		log = {}, -- every new spawn: { time, label, rarity, hour }
 	}
+
+	local RARITY_ORDER = { "secret", "mythic", "legendary", "epic", "rare", "uncommon", "common" }
+	local RARITY_SET = {}
+	for _, r in ipairs(RARITY_ORDER) do RARITY_SET[r] = true end
+	local function rarityKey(r)
+		if type(r) ~= "string" then return nil end
+		local k = r:lower()
+		if k == "mythical" then k = "mythic" end
+		if RARITY_SET[k] then return k end
+		return nil
+	end
+	local function cap(s) return s:sub(1, 1):upper() .. s:sub(2) end
 
 	local function partPos(t)
 		if t:IsA("PVInstance") then return t:GetPivot().Position end
@@ -1655,11 +1703,16 @@ xpcall(function()
 	local function record(t, isNew)
 		local key = t.Name
 		local kg, v = getWeight(t), trashValue(t)
-		if trashRarity(t) ~= nil then L.haveRarity = true end
+		local rawR = trashRarity(t)
+		if rawR ~= nil then L.haveRarity = true end
 		local myth = isMythic(t)
 		local text = describe(t)
 		L.info[key] = { label = text, kg = kg, value = v }
 		L.types[key] = (L.types[key] or 0) + 1
+
+		-- last seen by rarity (trash already on the map counts as "seen now")
+		local rk = rarityKey(rawR)
+		if rk then L.lastSeen[rk] = { time = nowSec(), label = text } end
 
 		local pos = partPos(t)
 		if pos then
@@ -1721,6 +1774,13 @@ xpcall(function()
 			lastItemAlert = now
 			notify("New trash", text)
 		end
+
+		-- spawn log (used by the copy button)
+		L.log[#L.log + 1] = {
+			time = now, label = text, hour = hour,
+			rarity = rk or (rawR ~= nil and tostring(rawR):lower()) or "unknown",
+		}
+		if #L.log > 600 then table.remove(L.log, 1) end
 	end
 
 	for _, t in ipairs(TrashFolder:GetChildren()) do record(t, false) end
@@ -1734,6 +1794,7 @@ xpcall(function()
 		L.types, L.info, L.nW, L.hW = {}, {}, {}, {}
 		L.nTot, L.hTot, L.waves, L.spots, L.mSpots, L.mythicTypes = 0, 0, {}, {}, {}, {}
 		L.lagSum, L.lagN, L.topSpot, L.mSpot = 0, 0, nil, nil
+		L.lastSeen, L.log = {}, {}
 		notify("Predict", "Learned data cleared")
 	end)
 
@@ -1755,10 +1816,9 @@ xpcall(function()
 			local slot = math.floor(t / 300)
 			local s5 = 300 - (t % 300)
 			local sh = 3600 - (t % 3600)
-			local clockOk, clockText = pcall(os.date, "%I:%M:%S %p")
 
 			clockLabel.Text = string.format("Next spawn:  %s   (every 5 min, on the clock)\nGuaranteed mythic:  %s   (every hour, on the hour)\nClock now: %s",
-				fmt(s5), fmt(sh), clockOk and clockText or "?")
+				fmt(s5), fmt(sh), clockStr(t, "%I:%M:%S %p"))
 
 			local hourSoon = math.floor(t / 3600) + 1
 			local warnS = tonumber(warnBox.Text) or 15
@@ -1784,7 +1844,7 @@ xpcall(function()
 		end
 	end)
 
-	---------------- prediction text (what / where) from the learned data
+	---------------- prediction text (what / where) + last seen panel
 	task.spawn(function()
 		while task.wait(1) do
 			if predictPage.Visible then
@@ -1881,7 +1941,91 @@ xpcall(function()
 				end
 
 				infoLabel.Text = table.concat(lines, "\n")
+
+				-- last seen by rarity
+				local seen = {}
+				for _, r in ipairs(RARITY_ORDER) do
+					local e = L.lastSeen[r]
+					if e then
+						seen[#seen + 1] = cap(r) .. ": " .. e.label .. "  (" .. fmt(nowSec() - e.time) .. " ago)"
+					else
+						seen[#seen + 1] = cap(r) .. ": not seen yet"
+					end
+				end
+				seenLabel.Text = table.concat(seen, "\n")
 			end
+		end
+	end)
+
+	---------------- copy data to clipboard (grouped by spawn time)
+	local function buildCopyText()
+		local out = {}
+		local t = nowSec()
+		out[#out + 1] = "=== Steal Trash: Predict data ==="
+		out[#out + 1] = "Generated: " .. clockStr(t, "%I:%M:%S %p")
+		out[#out + 1] = "Next spawn in " .. fmt(300 - t % 300) .. ", mythic hour in " .. fmt(3600 - t % 3600)
+		out[#out + 1] = ""
+
+		out[#out + 1] = "-- Last seen by rarity --"
+		for _, r in ipairs(RARITY_ORDER) do
+			local e = L.lastSeen[r]
+			if e then
+				out[#out + 1] = string.format("%s: %s (seen %s ago, at %s)", r:upper(), e.label,
+					fmt(t - e.time), clockStr(e.time))
+			else
+				out[#out + 1] = r:upper() .. ": not seen yet"
+			end
+		end
+		out[#out + 1] = ""
+
+		-- group the log by 5-minute spawn slot
+		out[#out + 1] = "-- Spawns by time (newest last) --"
+		local groups, cur = {}, nil
+		local startI = math.max(1, #L.log - 200)
+		for i = startI, #L.log do
+			local e = L.log[i]
+			local slot = math.floor(e.time / 300)
+			if not cur or cur.slot ~= slot then
+				cur = { slot = slot, hour = e.hour, items = {}, counts = {} }
+				groups[#groups + 1] = cur
+			end
+			cur.items[#cur.items + 1] = e
+			cur.counts[e.rarity] = (cur.counts[e.rarity] or 0) + 1
+		end
+		if #groups == 0 then
+			out[#out + 1] = "(no spawns recorded yet)"
+		end
+		for _, g in ipairs(groups) do
+			out[#out + 1] = string.format("%s spawn%s:", clockStr(g.slot * 300), g.hour and " (HOUR wave)" or "")
+			local parts = {}
+			for _, r in ipairs(RARITY_ORDER) do
+				if g.counts[r] then parts[#parts + 1] = cap(r) .. " x" .. g.counts[r] end
+			end
+			if g.counts["unknown"] then parts[#parts + 1] = "Unknown x" .. g.counts["unknown"] end
+			out[#out + 1] = "  Rarities: " .. (#parts > 0 and table.concat(parts, ", ") or "-")
+			for _, e in ipairs(g.items) do
+				out[#out + 1] = "  - " .. e.label
+			end
+		end
+		out[#out + 1] = ""
+		out[#out + 1] = "-- Current prediction --"
+		out[#out + 1] = infoLabel.Text
+		return table.concat(out, "\n")
+	end
+
+	local function setClip(text)
+		if setclipboard then return (pcall(setclipboard, text)) end
+		if toclipboard then return (pcall(toclipboard, text)) end
+		return false
+	end
+
+	copyBtn.MouseButton1Click:Connect(function()
+		local text = buildCopyText()
+		if setClip(text) then
+			notify("Predict", "Data copied to clipboard")
+		else
+			notify("Predict", "Clipboard not supported, printed to console")
+			print(text)
 		end
 	end)
 end, function(e) warn("[Predict tab error] " .. tostring(e)) end)
