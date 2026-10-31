@@ -370,7 +370,7 @@ local placeNowBtn = makeButton(placePage, UDim2.new(0.5, 5, 0, 54), UDim2.new(0.
 local autoPlaceBtn = makeButton(placePage, UDim2.new(0.5, 5, 0, 98), UDim2.new(0.5, -15, 0, 34), "AUTO PLACE: OFF")
 local placeStatus = pageStatus(placePage, 150)
 
--- Teleport page
+-- Teleport page (buttons + tween speed box)
 local tpPage = newPage("Teleport")
 local function tpButton(xScale, text)
 	local b = makeButton(tpPage, UDim2.new(xScale, 10, 0, 10), UDim2.new(1 / 3, -16, 0, 90), text, Color3.fromRGB(60, 60, 90))
@@ -381,6 +381,10 @@ local tpBase = tpButton(0, "BASE (PLOT)")
 local tpSell = tpButton(1 / 3, "SELL")
 local tpCompress = tpButton(2 / 3, "TRASH COMPRESSOR")
 local tpStatus = pageStatus(tpPage, 112)
+local speedBox = makeBox(tpPage, UDim2.fromOffset(10, 150), UDim2.new(0.5, -15, 0, 28), "60", "Tween speed (studs/sec)")
+local moveInfo = newText(tpPage, 150, 50, "Type a tween speed (studs/sec) on the left.", 11, false)
+moveInfo.Position = UDim2.new(0.5, 5, 0, 146)
+moveInfo.Size = UDim2.new(0.5, -15, 0, 56)
 
 refreshUI()
 
@@ -553,15 +557,32 @@ local function trim(s)
 	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
--- moves hrp to cframe with a tween instead of an instant jump (avoids anti-cheat snap-back)
+-- moves hrp with a tween; speed comes from the Teleport tab box (studs per second)
+local tweenStats = {}
 local function tweenTo(hrp, cframe, speed)
 	if not hrp then return end
-	speed = speed or 60 -- studs per second
+	speed = speed or math.clamp(tonumber(speedBox.Text) or 60, 5, 1000)
 	local dist = (cframe.Position - hrp.Position).Magnitude
-	local duration = math.clamp(dist / speed, 0.05, 2.5)
+	local duration = math.max(dist / speed, 0.05)
 	local tw = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = cframe })
 	tw:Play()
 	tw.Completed:Wait()
+	task.wait(0.3) -- give the anti-cheat time to react
+
+	-- did the game pull us back?
+	local key = tostring(speed)
+	local st = tweenStats[key]
+	if not st then
+		st = { moves = 0, pulled = 0 }
+		tweenStats[key] = st
+	end
+	local h = getHRP()
+	local pulled = h ~= nil and (h.Position - cframe.Position).Magnitude > 10
+	st.moves = st.moves + 1
+	if pulled then st.pulled = st.pulled + 1 end
+	moveInfo.Text = string.format("Last: %d studs in %.1fs\nAt %s/s: %d pulled back of %d moves\n%s",
+		math.floor(dist), duration, key, st.pulled, st.moves,
+		pulled and "PULLED BACK: lower the speed" or "OK")
 end
 
 -- Detect which plot belongs to the local player (checks common owner patterns)
